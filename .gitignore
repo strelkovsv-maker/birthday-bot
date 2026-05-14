@@ -1,0 +1,32 @@
+# Secrets
+.env
+.env.local
+.env.*.local
+*.json.key
+service_account*.json
+
+# State / runtime
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+state/
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

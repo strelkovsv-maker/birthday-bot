@@ -1,0 +1,12 @@
+python-telegram-bot==21.6
+anthropic==0.39.0
+# httpx 0.28+ removed the `proxies` kwarg that anthropic 0.39 passes; pin below 0.28.
+httpx>=0.25,<0.28
+gspread==6.1.4
+google-auth==2.35.0
+apscheduler==3.10.4
+pytz==2024.2
+python-dotenv==1.0.1
+# Use OS-native trust store (macOS Keychain / Linux ca-certificates) so
+# corporate TLS-inspecting proxies don't break HTTPS calls.
+truststore>=0.10
