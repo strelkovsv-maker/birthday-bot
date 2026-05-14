@@ -4,6 +4,8 @@
 .env.*.local
 *.json.key
 service_account*.json
+secrets/*
+!secrets/.gitkeep
 
 # State / runtime
 *.db

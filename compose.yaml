@@ -1,0 +1,15 @@
+services:
+  bot:
+    build: .
+    container_name: birthday-bot
+    env_file: .env
+    environment:
+      GOOGLE_SERVICE_ACCOUNT_JSON: /run/secrets/google-sa.json
+      DB_PATH: /data/state.db
+    volumes:
+      - bot-data:/data
+      - ./secrets/google-sa.json:/run/secrets/google-sa.json:ro
+    restart: unless-stopped
+
+volumes:
+  bot-data:
