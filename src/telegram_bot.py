@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import html
 import logging
+import re
 from typing import Optional
 
 from telegram import (
@@ -41,11 +42,56 @@ def _approval_keyboard(draft_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-def _format_owner_message(person_name: str, department: str, draft_text: str) -> str:
-    """Format the DM the owner sees, in HTML for safe escaping."""
-    name_html = html.escape(person_name)
-    dept_html = html.escape(department) if department else ""
-    body_html = html.escape(draft_text)
+# Match "С днём/днем рождения" + optional trailing punctuation.
+# Case-insensitive, ё/е tolerant, allows extra whitespace between words.
+_GREETING_PATTERN = re.compile(
+    r"С\s+дн[её]м\s+рождения\s*([!.…]*)",
+    re.IGNORECASE,
+)
+
+
+def _inject_handle_into_greeting(wish: str, handle: str) -> str:
+    """Inject the Telegram handle into the LLM-produced birthday greeting.
+
+    The LLM is calibrated to end wishes with "С днём рождения!" (somewhere,
+    usually at the very end). This function finds the LAST occurrence of
+    that phrase in the wish and replaces it with "С днём рождения, @handle!"
+    so the person gets a Telegram mention.
+
+    Behavior:
+      - With handle, greeting present → injects handle into greeting
+      - With handle, no greeting → returns wish unchanged (rare; the prompt
+        normally forces a greeting)
+      - Without handle → returns wish unchanged (fallback per design)
+
+    Case is normalized to "С днём рождения" in the output regardless of
+    what the LLM wrote ("С Днём Рождения" → "С днём рождения, @h!").
+    """
+    if not handle:
+        return wish
+
+    matches = list(_GREETING_PATTERN.finditer(wish))
+    if not matches:
+        return wish
+
+    last = matches[-1]
+    return (
+        wish[:last.start()]
+        + f"С днём рождения, {handle}!"
+        + wish[last.end():]
+    )
+
+
+def _format_owner_message(person: TeamMember, draft_text: str) -> str:
+    """Format the DM the owner sees, in HTML for safe escaping.
+
+    Shows the wish with the @handle already injected into the closing
+    greeting — so the owner's preview matches exactly what will be posted.
+    """
+    name_html = html.escape(person.name)
+    dept_html = html.escape(person.department) if person.department else ""
+    final_text = _inject_handle_into_greeting(draft_text, person.telegram_handle)
+    body_html = html.escape(final_text)
     header = f"🎂 Сегодня день рождения у <b>{name_html}</b>"
     if dept_html:
         header += f" ({dept_html})"
@@ -55,14 +101,24 @@ def _format_owner_message(person_name: str, department: str, draft_text: str) ->
 def _format_group_post(person: TeamMember, draft_text: str) -> str:
     """Format the message posted to the group chat.
 
-    The wish body opens with the person's formal first name (LLM-generated, e.g.
-    "Сергей, ..."), so the body reads as a human address. We append the @handle
-    on its own line at the end as a quiet Telegram ping — so the person gets
-    a mention notification without doubling up on the vocative.
+    Injects the @handle into the existing "С днём рождения!" greeting if
+    a handle is available; otherwise returns the wish unchanged.
     """
-    if person.telegram_handle:
-        return f"{draft_text}\n\n{person.telegram_handle}"
-    return draft_text
+    return _inject_handle_into_greeting(draft_text, person.telegram_handle)
+
+
+def _draft_to_team_member(draft: Draft) -> TeamMember:
+    """Reconstruct a minimal TeamMember from a stored Draft. Used by the
+    callback handlers (approve/retry/skip) to format messages identically
+    to the initial DM."""
+    return TeamMember(
+        name=draft.person_name,
+        telegram_handle=draft.person_handle,
+        birthday_month=0, birthday_day=0,  # not used for formatting
+        department=draft.department,
+        role=draft.role,
+        notes=draft.notes,
+    )
 
 
 # ----- Sending drafts -----------------------------------------------------
@@ -95,7 +151,7 @@ class BirthdayBotHandlers:
             notes=person.notes,
             current_draft=draft_text,
         )
-        text = _format_owner_message(person.name, person.department, draft_text)
+        text = _format_owner_message(person, draft_text)
         msg = await app.bot.send_message(
             chat_id=self.settings.owner_chat_id,
             text=text,
@@ -153,19 +209,8 @@ class BirthdayBotHandlers:
     async def _approve(self, query, context, draft: Draft) -> None:
         await query.answer("Публикую…")
 
-        # Reconstruct a TeamMember-like object for formatting (we only need
-        # name + handle here)
-        post_text = _format_group_post(
-            person=TeamMember(
-                name=draft.person_name,
-                telegram_handle=draft.person_handle,
-                birthday_month=0, birthday_day=0,  # not used for post
-                department=draft.department,
-                role=draft.role,
-                notes=draft.notes,
-            ),
-            draft_text=draft.current_draft,
-        )
+        person = _draft_to_team_member(draft)
+        post_text = _format_group_post(person, draft.current_draft)
 
         if self.settings.dry_run:
             logger.warning("DRY_RUN: would have posted to group: %s", post_text)
@@ -182,9 +227,7 @@ class BirthdayBotHandlers:
         # Edit the DM to reflect the action and remove the buttons
         try:
             await query.edit_message_text(
-                text=_format_owner_message(
-                    draft.person_name, draft.department, draft.current_draft
-                ) + footer,
+                text=_format_owner_message(person, draft.current_draft) + footer,
                 parse_mode=ParseMode.HTML,
             )
         except Exception:
@@ -216,9 +259,7 @@ class BirthdayBotHandlers:
         # Edit the existing DM with the new draft + same buttons
         try:
             await query.edit_message_text(
-                text=_format_owner_message(
-                    draft.person_name, draft.department, new_text
-                ),
+                text=_format_owner_message(_draft_to_team_member(draft), new_text),
                 parse_mode=ParseMode.HTML,
                 reply_markup=_approval_keyboard(draft.id),
             )
@@ -231,7 +272,7 @@ class BirthdayBotHandlers:
         try:
             await query.edit_message_text(
                 text=_format_owner_message(
-                    draft.person_name, draft.department, draft.current_draft
+                    _draft_to_team_member(draft), draft.current_draft
                 ) + "\n\n❌ <i>Пропущено</i>",
                 parse_mode=ParseMode.HTML,
             )
